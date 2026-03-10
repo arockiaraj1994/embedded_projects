@@ -44,6 +44,9 @@
 #define WIFI_TIMEOUT_SEC 15
 #define MAX_DISPLAY_TASKS 4
 
+#define NIGHT_START_HOUR 22  // 10 PM
+#define NIGHT_END_HOUR    6  // 6 AM
+
 static const char* NTP_SERVER = "pool.ntp.org";
 static const long  IST_OFFSET = 19800;  // UTC+5:30
 
@@ -64,7 +67,10 @@ struct TaskResult {
   TaskItem items[MAX_DISPLAY_TASKS];
   int      count;
   bool     success;
+  bool     unchanged;
 };
+
+RTC_DATA_ATTR uint32_t lastPayloadHash = 0;
 
 // ——————————————————————————————————————————————
 // Helpers
@@ -74,6 +80,12 @@ static const char* MONTH_NAMES[] = {
   "Jan","Feb","Mar","Apr","May","Jun",
   "Jul","Aug","Sep","Oct","Nov","Dec"
 };
+
+uint32_t hashPayload(const char* s) {
+  uint32_t h = 5381;
+  while (*s) h = ((h << 5) + h) + (uint8_t)*s++;
+  return h;
+}
 
 // "2026-03-10" -> "Mar 10", also sets overdue flag
 String formatDue(const char* iso, bool &overdue) {
@@ -110,6 +122,7 @@ String formatDue(const char* iso, bool &overdue) {
 
 bool connectWiFi() {
   WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_POWER_11dBm);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
   unsigned long t0 = millis();
@@ -127,6 +140,28 @@ bool connectWiFi() {
   struct tm ti;
   getLocalTime(&ti, 5000);
   return true;
+}
+
+// Returns minutes to sleep until NIGHT_END_HOUR, or 0 if daytime
+int nightSleepMinutes() {
+  struct tm ti;
+  if (!getLocalTime(&ti, 0)) return 0;
+
+  int hour = ti.tm_hour;
+  int min  = ti.tm_min;
+
+  bool isNight = (hour >= NIGHT_START_HOUR || hour < NIGHT_END_HOUR);
+  if (!isNight) return 0;
+
+  int wakeHour = NIGHT_END_HOUR;
+  int minsUntilWake;
+  if (hour >= NIGHT_START_HOUR) {
+    minsUntilWake = (24 - hour + wakeHour) * 60 - min;
+  } else {
+    minsUntilWake = (wakeHour - hour) * 60 - min;
+  }
+  if (minsUntilWake < 1) minsUntilWake = 1;
+  return minsUntilWake;
 }
 
 // ——————————————————————————————————————————————
@@ -159,6 +194,15 @@ TaskResult fetchTasks() {
   String payload = http.getString();
   http.end();
   Serial.printf("Payload %d bytes\n", payload.length());
+
+  uint32_t h = hashPayload(payload.c_str());
+  if (h == lastPayloadHash) {
+    Serial.println("Data unchanged, skipping refresh");
+    r.success   = true;
+    r.unchanged = true;
+    return r;
+  }
+  lastPayloadHash = h;
 
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, payload);
@@ -231,6 +275,18 @@ void drawScreen(const TaskResult &r) {
     display.drawLine(0, 26, 200, 26, GxEPD_BLACK);
     display.setTextWrap(false);
 
+    // ── Footer: last update ──
+    display.setFont(NULL);
+    display.setTextSize(1);
+    display.setTextColor(GxEPD_BLACK);
+    struct tm ti;
+    if (getLocalTime(&ti, 0)) {
+      char buf[24];
+      strftime(buf, sizeof(buf), "Updated: %H:%M IST", &ti);
+      display.setCursor(5, 192);
+      display.print(buf);
+    }
+
     // ── Tasks ──
     if (r.count == 0) {
       display.setFont(&FreeSans9pt7b);
@@ -241,8 +297,8 @@ void drawScreen(const TaskResult &r) {
       display.print(msg);
     } else {
       int yBase = 30;
-      int blockH = (195 - yBase) / min(r.count, MAX_DISPLAY_TASKS);
-      if (blockH > 42) blockH = 42;
+      int blockH = (185 - yBase) / min(r.count, MAX_DISPLAY_TASKS);
+      if (blockH > 38) blockH = 38;
 
       for (int i = 0; i < r.count; i++) {
         int yOff = yBase + i * blockH;
@@ -320,12 +376,12 @@ void drawError(const char* msg) {
 // Deep sleep
 // ——————————————————————————————————————————————
 
-void enterDeepSleep() {
+void enterDeepSleep(int minutes) {
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   display.hibernate();
-  esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MINUTES * 60ULL * 1000000ULL);
-  Serial.println("Deep sleep...");
+  esp_sleep_enable_timer_wakeup((uint64_t)minutes * 60ULL * 1000000ULL);
+  Serial.printf("Deep sleep %d min...\n", minutes);
   Serial.flush();
   esp_deep_sleep_start();
 }
@@ -342,19 +398,28 @@ void setup() {
 
   if (!connectWiFi()) {
     drawError("No WiFi");
-    enterDeepSleep();
+    enterDeepSleep(SLEEP_MINUTES);
+    return;
+  }
+
+  int nightMins = nightSleepMinutes();
+  if (nightMins > 0) {
+    Serial.printf("Night mode, sleeping %d min until %d:00\n", nightMins, NIGHT_END_HOUR);
+    enterDeepSleep(nightMins);
     return;
   }
 
   TaskResult tasks = fetchTasks();
 
-  if (tasks.success) {
+  if (tasks.success && tasks.unchanged) {
+    Serial.println("No change, skip display");
+  } else if (tasks.success) {
     drawScreen(tasks);
   } else {
     drawError("API Error");
   }
 
-  enterDeepSleep();
+  enterDeepSleep(SLEEP_MINUTES);
 }
 
 void loop() {
