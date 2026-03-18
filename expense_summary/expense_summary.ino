@@ -2,7 +2,7 @@
  * Expense Summary — ESP32 + 1.54" 3-Color E-Paper (200x200, B/W/Red)
  *
  * Fetches monthly expense data from a Google Apps Script proxy and
- * displays a table of card-wise spending (monthly + today).
+ * displays a table of card-wise spending (monthly + yesterday + today).
  * Deep-sleeps 1 hour between refreshes; quiet from 11 PM to 6 AM.
  *
  * Hardware wiring (ESP32 VSPI):
@@ -60,6 +60,7 @@ struct CardItem {
   String id;
   String name;
   int32_t monthly;
+  int32_t yesterday;
   int32_t today;
 };
 
@@ -228,10 +229,11 @@ ExpenseResult fetchExpenses() {
 
   for (int i = 0; i < total; i++) {
     JsonObject c = cards[i];
-    r.cards[i].id      = c["id"].as<String>();
-    r.cards[i].name    = c["name"].as<String>();
-    r.cards[i].monthly = c["monthly"].as<int32_t>();
-    r.cards[i].today   = c["today"].as<int32_t>();
+    r.cards[i].id        = c["id"].as<String>();
+    r.cards[i].name      = c["name"].as<String>();
+    r.cards[i].monthly   = c["monthly"].as<int32_t>();
+    r.cards[i].yesterday = c["yesterday"].as<int32_t>();
+    r.cards[i].today     = c["today"].as<int32_t>();
   }
 
   r.count   = total;
@@ -246,10 +248,9 @@ ExpenseResult fetchExpenses() {
 // ——————————————————————————————————————————————
 
 static const int COL1_X =  2;   // Card name start
-static const int DIV1_X = 90;   // First vertical divider
-static const int COL2_X = 92;   // Monthly column start
-static const int DIV2_X = 150;  // Second vertical divider
-static const int COL3_X = 152;  // Today column start
+static const int DIV1_X = 68;   // After card name
+static const int DIV2_X = 124;  // After monthly
+static const int DIV3_X = 162;  // After yesterday
 static const int TABLE_R = 198; // Right edge
 
 // Right-align text at xRight using built-in font (6px per char at size 1)
@@ -294,22 +295,24 @@ void drawScreen(const ExpenseResult &r) {
 
     display.setCursor(COL1_X + 2, tableTop + 3);
     display.print("Card");
-    drawRightAligned(DIV2_X - 4, tableTop + 3, "Monthly");
+    drawRightAligned(DIV2_X - 3, tableTop + 3, "Monthly");
+    drawRightAligned(DIV3_X - 3, tableTop + 3, "Yest");
     drawRightAligned(TABLE_R - 2, tableTop + 3, "Today");
 
     int headerBottom = tableTop + 14;
     display.drawLine(0, headerBottom, 200, headerBottom, GxEPD_BLACK);
 
-    // Vertical dividers spanning the table
     int tableBottom = headerBottom + r.count * 18 + 2;
 
     display.drawLine(DIV1_X, tableTop, DIV1_X, tableBottom, GxEPD_BLACK);
     display.drawLine(DIV2_X, tableTop, DIV2_X, tableBottom, GxEPD_BLACK);
+    display.drawLine(DIV3_X, tableTop, DIV3_X, tableBottom, GxEPD_BLACK);
 
     // ── Data rows ──
     display.setTextColor(GxEPD_BLACK);
-    int32_t totalMonthly = 0;
-    int32_t totalToday   = 0;
+    int32_t totalMonthly   = 0;
+    int32_t totalYesterday = 0;
+    int32_t totalToday     = 0;
 
     for (int i = 0; i < r.count; i++) {
       int rowY = headerBottom + 4 + i * 18;
@@ -317,11 +320,13 @@ void drawScreen(const ExpenseResult &r) {
       display.setCursor(COL1_X + 2, rowY);
       display.print(r.cards[i].name);
 
-      drawRightAligned(DIV2_X - 4, rowY, formatAmount(r.cards[i].monthly));
+      drawRightAligned(DIV2_X - 3, rowY, formatAmount(r.cards[i].monthly));
+      drawRightAligned(DIV3_X - 3, rowY, formatAmount(r.cards[i].yesterday));
       drawRightAligned(TABLE_R - 2, rowY, formatAmount(r.cards[i].today));
 
-      totalMonthly += r.cards[i].monthly;
-      totalToday   += r.cards[i].today;
+      totalMonthly   += r.cards[i].monthly;
+      totalYesterday += r.cards[i].yesterday;
+      totalToday     += r.cards[i].today;
 
       if (i < r.count - 1) {
         int sepY = headerBottom + (i + 1) * 18;
@@ -337,11 +342,13 @@ void drawScreen(const ExpenseResult &r) {
     display.setTextColor(GxEPD_RED);
     display.setCursor(COL1_X + 2, totY);
     display.print("TOTAL");
-    drawRightAligned(DIV2_X - 4, totY, formatAmount(totalMonthly));
+    drawRightAligned(DIV2_X - 3, totY, formatAmount(totalMonthly));
+    drawRightAligned(DIV3_X - 3, totY, formatAmount(totalYesterday));
     drawRightAligned(TABLE_R - 2, totY, formatAmount(totalToday));
 
     display.drawLine(DIV1_X, tableBottom, DIV1_X, tableBottom + 14, GxEPD_BLACK);
     display.drawLine(DIV2_X, tableBottom, DIV2_X, tableBottom + 14, GxEPD_BLACK);
+    display.drawLine(DIV3_X, tableBottom, DIV3_X, tableBottom + 14, GxEPD_BLACK);
 
     int totalBottom = tableBottom + 16;
     display.drawLine(0, totalBottom, 200, totalBottom, GxEPD_BLACK);
